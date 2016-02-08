@@ -10,7 +10,6 @@ janus-info /path/to/unix/socket
 ## janus-list-sessions
 Connects to gateway and issues the `list_sessions` Admin API request.
 
-## Usage
 ```
 janus-list-sessions /path/to/unix/socket [admin_secret]
 ```
