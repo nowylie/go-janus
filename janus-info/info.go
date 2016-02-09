@@ -1,46 +1,31 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"net"
+	"github.com/nowylie/go-janus/janus"
 	"os"
+	"encoding/json"
 )
 
 func main() {
-	upath := fmt.Sprintf("/tmp/janus-info.%d", os.Getpid())
+	if len(os.Args) < 2 {
+		fmt.Printf("usage: janus-echotest </path/to/socket>\n")
+		return
+	}
 
-	// Address of local socket
-	laddr := &net.UnixAddr{upath, "unixgram"}
-	// Address of janus socket
-	raddr := &net.UnixAddr{os.Args[1], "unixgram"}
+	gateway, err := janus.Connect(os.Args[1])
+	if err != nil {
+		fmt.Printf("Connect: %s\n")
+		return
+	}
 
-	// Create unix datagram socket
-	conn, _ := net.DialUnix("unixgram", laddr, raddr)
+	info, err := gateway.Info()
+	if err != nil {
+		fmt.Printf("Info: %s\n", err)
+		return
+	}
 
-	// Create info request
-	info := make(map[string]string)
-	info["janus"] = "info"
-	info["transaction"] = "1234"
-
-	// Marshal request to json and sent to Janus
-	req, _ := json.Marshal(info)
-	conn.Write(req)
-
-	// Receive response
-	res := make([]byte, 8192)
-	n, _ := conn.Read(res)
-
-	// Format output
-	var out bytes.Buffer
-	json.Indent(&out, res[:n], "", "\t")
-	out.Write([]byte("\n"))
-
-	// Write to stdout
-	out.WriteTo(os.Stdout)
-
-	// Cleanup local socket
-	conn.Close()
-	os.Remove(upath)
+	infoStr, _ := json.MarshalIndent(info, "", "\t")
+	fmt.Printf("%s\n", string(infoStr))
+	gateway.Close()
 }
