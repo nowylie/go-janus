@@ -105,8 +105,7 @@ func (gw *Gateway) recv() {
 		// Look up replyChan
 		transactionStr, ok := msg["transaction"].(string)
 		if !ok {
-			str, _ := json.MarshalIndent(msg, "", "\t")
-			fmt.Printf("received message without transaction field:\n%s\n", str)
+			fmt.Printf("warn: dropping message without transaction field\n")
 			continue
 		}
 		

@@ -29,15 +29,12 @@ func main() {
 		fmt.Printf("Attach: %s\n", err)
 		return
 	}
-	if handle != nil {
-		fmt.Printf("handle created\n")
-	}
 
-	//err = handle.Detach()
-	//if err != nil {
-	//	fmt.Printf("Detach: %s\n", err)
-	//	return
-	//}
+	err = handle.Detach()
+	if err != nil {
+		fmt.Printf("Detach: %s\n", err)
+		return
+	}
 
 	err = session.Destroy()
 	if err != nil {
