@@ -3,6 +3,7 @@
 package janus
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,14 @@ import (
 	"sync"
 	"sync/atomic"
 )
+
+var debug = false
+
+func init() {
+	if os.Getenv("DEBUG") != "" {
+		debug = true
+	}
+}
 
 func newRequest(method string) (map[string]interface{}, chan map[string]interface{}) {
 	req := make(map[string]interface{})
@@ -75,6 +84,14 @@ func (gw *Gateway) send(msg map[string]interface{}, replyChan chan map[string]in
 		return
 	}
 
+	if debug {
+		// log message being sent
+		var log bytes.Buffer
+		json.Indent(&log, data, ">", "   ")
+		log.Write([]byte("\n"))
+		log.WriteTo(os.Stdout)
+	}
+
 	_, err = gw.conn.Write(data)
 	if err != nil {
 		fmt.Printf("conn.Write: %s\n", err)
@@ -83,6 +100,7 @@ func (gw *Gateway) send(msg map[string]interface{}, replyChan chan map[string]in
 }
 
 func (gw *Gateway) recv() {
+	var log bytes.Buffer
 	buffer := make([]byte, 8192)
 
 	for {
@@ -91,6 +109,13 @@ func (gw *Gateway) recv() {
 		if err != nil {
 			fmt.Printf("conn.Read: %s\n", err)
 			return
+		}
+
+		if debug {
+			// Log received message
+			json.Indent(&log, buffer[:n], "<", "   ")
+			log.Write([]byte("\n"))
+			log.WriteTo(os.Stdout)
 		}
 
 		// Decode message
@@ -105,17 +130,48 @@ func (gw *Gateway) recv() {
 		// Look up replyChan
 		transactionStr, ok := msg["transaction"].(string)
 		if !ok {
-			fmt.Printf("warn: dropping message without transaction field\n")
+			session_id := uint64(msg["session_id"].(float64))
+			if session_id == 0 {
+				// error, no session_id
+				continue
+			}
+
+			handle_id := uint64(msg["sender"].(float64))
+			if handle_id == 0 {
+				// error, no handle_id
+				continue
+			}
+
+			// Lookup session
+			gw.Lock()
+			session := gw.sessions[session_id]
+			gw.Unlock()
+			if session == nil {
+				// error, invalid session_id
+				continue
+			}
+
+			session.Lock()
+			handle := session.handles[handle_id]
+			session.Unlock()
+			if handle == nil {
+				// error, invalid handle_id
+				continue
+			}
+
+			handle.Events <- msg
 			continue
 		}
-		
+
 		transaction, err := strconv.ParseUint(transactionStr, 10, 64)
 		gw.Lock()
 		replyChan := gw.replyChans[transaction]
 		gw.Unlock()
 
 		if replyChan != nil {
-			replyChan <- msg
+			go func() {
+				replyChan <- msg
+			}()
 		}
 	}
 }
@@ -131,7 +187,7 @@ func (gw *Gateway) Info() (map[string]interface{}, error) {
 	if err := checkError(response); err != nil {
 		return nil, err
 	}
-	
+
 	return response, nil
 }
 
@@ -190,7 +246,10 @@ func (s *Session) Attach(plugin string) (*Handle, error) {
 	}
 
 	data := response["data"].(map[string]interface{})
-	handle := &Handle{s, uint64(data["id"].(float64))}
+	handle := new(Handle)
+	handle.session = s
+	handle.id = uint64(data["id"].(float64))
+	handle.Events = make(chan map[string]interface{}, 8)
 	s.Lock()
 	s.handles[handle.id] = handle
 	s.Unlock()
@@ -234,6 +293,7 @@ func (s *Session) Destroy() error {
 type Handle struct {
 	session *Session
 	id      uint64
+	Events  chan map[string]interface{}
 }
 
 func (h *Handle) send(msg map[string]interface{}, replyChan chan map[string]interface{}) {
@@ -246,7 +306,7 @@ func (h *Handle) send(msg map[string]interface{}, replyChan chan map[string]inte
 // contain an optional SDP offer/answer to establish a WebRTC PeerConnection.
 // If a successful response is received, it is returned. Othwerise an error is
 // returned.
-func (h *Handle) Message(body, jsep map[string]interface{}) (map[string]interface{}, error) {
+func (h *Handle) Message(body, jsep interface{}) (map[string]interface{}, error) {
 	message, ch := newRequest("message")
 	if body != nil {
 		message["body"] = body
@@ -257,19 +317,46 @@ func (h *Handle) Message(body, jsep map[string]interface{}) (map[string]interfac
 	h.send(message, ch)
 
 	// FIXME: handle 'ack' messages
+GetResponse:
 	response := <-ch
 	if err := checkError(response); err != nil {
 		return nil, err
 	}
-	return response["plugindata"].(map[string]interface{}), nil
+
+	if response["janus"].(string) == "ack" {
+		goto GetResponse
+	}
+
+	return response, nil
 }
 
 // Trickle sends a trickle request to the Gateway as part of the ICE process.
 // candidate should be a single ICE candidate, an Array of ICE candidates, or
 // a completed object: {"completed": true}.
 // If an error is received in response to this request, it is returned.
-func (h *Handle) Trickle(candidate map[string]interface{}) error {
-	// FIXME
+func (h *Handle) Trickle(candidate interface{}) error {
+	trickle, ch := newRequest("trickle")
+	trickle["candidate"] = candidate
+	h.send(trickle, ch)
+
+	response := <-ch
+	if err := checkError(response); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (h *Handle) TrickleMany(candidate interface{}) error {
+	trickle, ch := newRequest("trickle")
+	trickle["candidates"] = candidate
+	h.send(trickle, ch)
+
+	response := <-ch
+	if err := checkError(response); err != nil {
+		return err
+	}
+
 	return nil
 }
 
