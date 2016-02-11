@@ -118,6 +118,35 @@ func (gw *Gateway) recv() {
 			log.WriteTo(os.Stdout)
 		}
 
+		// Decode to Msg struct
+		var base BaseMsg
+		if err := json.Unmarshal(buffer, &base); err != nil {
+			// Decode error
+		}
+
+		msg, ok := msgtype[base.Type]()
+		if !ok {
+			// Unknown message type!
+		}
+		if err := json.Unmarshal(buffer, &msg); err != nil {
+			// Decode error
+		}
+
+		// Pass message on from here
+		if base.Id == 0 {
+			// Is this a Handle event?
+			if base.Handle == 0 {
+				// Nope. No idea what's going on...
+				// Error()
+			} else {
+				// Lookup Handle channel
+				// Pass event
+			}
+		} else {
+			// Lookup Transaction channel
+			// Pass response
+		}
+
 		// Decode message
 		var data interface{}
 		err = json.Unmarshal(buffer[:n], &data)
@@ -347,9 +376,9 @@ func (h *Handle) Trickle(candidate interface{}) error {
 	return nil
 }
 
-func (h *Handle) TrickleMany(candidate interface{}) error {
+func (h *Handle) TrickleMany(candidates interface{}) error {
 	trickle, ch := newRequest("trickle")
-	trickle["candidates"] = candidate
+	trickle["candidates"] = candidates
 	h.send(trickle, ch)
 
 	response := <-ch
@@ -378,4 +407,50 @@ func (h *Handle) Detach() error {
 	h.session.Unlock()
 
 	return nil
+}
+
+type GatewayRequest interface {
+	GetTransaction() uint64
+	SetTransaction(uint64)
+}
+
+type SessionRequest interface {
+	GatewayRequest
+	GetSessionId() uint64
+	SetSessionId(uint64)
+}
+
+type HandleRequest interface {
+	GetHandleId() uint64
+	SetHandleId(uint64)
+}
+
+type Transaction uint64
+
+func (t *Transaction) GetTransaction() uint64 {
+	return uint64(*t)
+}
+
+func (t *Transaction) SetTransaction(transaction uint64) {
+	*t = Transaction(transaction)
+}
+
+type SessionId uint64
+
+func (sid *SessionId) GetSessionId() uint64 {
+	return uint64(*sid)
+}
+
+func (sid *SessionId) SetSessionId(id uint64) {
+	*sid = SessionId(id)
+}
+
+type HandleId uint64
+
+func (hid *HandleId) GetHandleId() uint64 {
+	return uint64(*hid)
+}
+
+func (hid *HandleId) SetHandleId(id uint64) {
+	*hid = HandleId(id)
 }
