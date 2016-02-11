@@ -21,8 +21,7 @@ const echoHtml = `
 		}
 		
 		var Servers = [
-		//	{urls: "stun:192.168.1.239"}
-		//	{urls: "stun:101.178.170.14"}
+			{urls: "stun:stun3.l.google.com:19302"}
 		];
 	</script>
 </head><body>

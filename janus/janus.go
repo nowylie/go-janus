@@ -26,7 +26,7 @@ func unexpected(request string) error {
 }
 
 func newRequest(method string) (map[string]interface{}, chan interface{}) {
-	req := make(map[string]interface{})
+	req := make(map[string]interface{}, 8)
 	req["janus"] = method
 	return req, make(chan interface{})
 }
@@ -94,6 +94,10 @@ func (gateway *Gateway) send(msg map[string]interface{}, transaction chan interf
 	}
 }
 
+func passMsg(ch chan interface{}, msg interface{}) {
+   ch <- msg
+}
+
 func (gateway *Gateway) recv() {
 	var log bytes.Buffer
 	buffer := make([]byte, 8192)
@@ -158,7 +162,7 @@ func (gateway *Gateway) recv() {
 				}
 
 				// Pass msg
-				handle.Events <- msg
+				go passMsg(handle.Events, msg)
 			}
 		} else {
 			id, _ := strconv.ParseUint(base.Id, 10, 64) // FIXME: error checking
@@ -171,7 +175,7 @@ func (gateway *Gateway) recv() {
 			}
 
 			// Pass msg
-			transaction <- msg
+			go passMsg(transaction, msg)
 		}
 	}
 }

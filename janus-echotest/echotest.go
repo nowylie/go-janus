@@ -36,6 +36,7 @@ type Request struct {
 }
 
 func EchoTest(w http.ResponseWriter, r *http.Request) {
+   fmt.Printf("%s %s %s\n", r.Method, r.URL, r.Proto)
 	if r.Method == "GET" {
 		_, err := w.Write([]byte(echoHtml))
 		if err != nil {
