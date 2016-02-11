@@ -69,26 +69,26 @@ func EchoTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := handle.Message(request.Body, nil)
+	event, err := handle.Message(request.Body, nil)
 	if err != nil {
 		fmt.Printf("handle.Message: %s\n", err)
 		return
 	}
 
-	response, err = handle.Message(request.Body, request.Offer)
+	event, err = handle.Message(request.Body, request.Offer)
 	if err != nil {
 		fmt.Printf("handle.Message: %s\n", err)
 		return
 	}
 
-	out, err := json.Marshal(response["jsep"])
+	out, err := json.Marshal(event.Jsep)
 	if err != nil {
 		fmt.Printf("json.Marshal: %s\n", err)
 		return
 	}
 	w.Write(out)
 
-	err = handle.TrickleMany(request.Candidates)
+	_, err = handle.TrickleMany(request.Candidates)
 	if err != nil {
 		fmt.Printf("handle.Trickle: %s\n", err)
 		return
@@ -97,11 +97,14 @@ func EchoTest(w http.ResponseWriter, r *http.Request) {
 
 func watch(session *janus.Session, handle *janus.Handle, stop chan interface{}) {
 	for {
-		event := <-handle.Events
-		if event["janus"] == "media" && event["receiving"] == "false" {
-			handle.Detach()
-			session.Destroy()
-			close(stop)
+		msg := <-handle.Events
+		switch msg := msg.(type) {
+		case *janus.MediaMsg:
+			if msg.Receiving == "false" {
+				handle.Detach()
+				session.Destroy()
+				close(stop)
+			}
 		}
 	}
 }

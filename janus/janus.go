@@ -5,7 +5,6 @@ package janus
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -22,26 +21,22 @@ func init() {
 	}
 }
 
-func newRequest(method string) (map[string]interface{}, chan map[string]interface{}) {
-	req := make(map[string]interface{})
-	req["janus"] = method
-	return req, make(chan map[string]interface{})
+func unexpected(request string) error {
+	return fmt.Errorf("Unexpected response received to '%s' request", request)
 }
 
-func checkError(msg map[string]interface{}) error {
-	if msg["janus"].(string) == "error" {
-		err := msg["error"].(map[string]interface{})
-		return errors.New(err["reason"].(string))
-	}
-	return nil
+func newRequest(method string) (map[string]interface{}, chan interface{}) {
+	req := make(map[string]interface{})
+	req["janus"] = method
+	return req, make(chan interface{})
 }
 
 // Gateway represents a connection to an instance of the Janus Gateway.
 type Gateway struct {
 	conn            net.Conn
 	nextTransaction uint64
-	replyChans      map[uint64]chan map[string]interface{}
-	sessions        map[uint64]*Session
+	transactions    map[uint64]chan interface{}
+	Sessions        map[uint64]*Session
 	sync.Mutex
 }
 
@@ -57,26 +52,26 @@ func Connect(rpath string) (*Gateway, error) {
 		return nil, err
 	}
 
-	gw := new(Gateway)
-	gw.conn = conn
-	gw.replyChans = make(map[uint64]chan map[string]interface{})
-	gw.sessions = make(map[uint64]*Session)
+	gateway := new(Gateway)
+	gateway.conn = conn
+	gateway.transactions = make(map[uint64]chan interface{})
+	gateway.Sessions = make(map[uint64]*Session)
 
-	go gw.recv()
-	return gw, nil
+	go gateway.recv()
+	return gateway, nil
 }
 
-func (gw *Gateway) Close() error {
-	return gw.conn.Close()
+func (gateway *Gateway) Close() error {
+	return gateway.conn.Close()
 }
 
-func (gw *Gateway) send(msg map[string]interface{}, replyChan chan map[string]interface{}) {
-	id := atomic.AddUint64(&gw.nextTransaction, 1)
+func (gateway *Gateway) send(msg map[string]interface{}, transaction chan interface{}) {
+	id := atomic.AddUint64(&gateway.nextTransaction, 1)
 
 	msg["transaction"] = strconv.FormatUint(id, 10)
-	gw.Lock()
-	gw.replyChans[id] = replyChan
-	gw.Unlock()
+	gateway.Lock()
+	gateway.transactions[id] = transaction
+	gateway.Unlock()
 
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -92,20 +87,20 @@ func (gw *Gateway) send(msg map[string]interface{}, replyChan chan map[string]in
 		log.WriteTo(os.Stdout)
 	}
 
-	_, err = gw.conn.Write(data)
+	_, err = gateway.conn.Write(data)
 	if err != nil {
 		fmt.Printf("conn.Write: %s\n", err)
 		return
 	}
 }
 
-func (gw *Gateway) recv() {
+func (gateway *Gateway) recv() {
 	var log bytes.Buffer
 	buffer := make([]byte, 8192)
 
 	for {
 		// Read message from Gateway
-		n, err := gw.conn.Read(buffer)
+		n, err := gateway.conn.Read(buffer)
 		if err != nil {
 			fmt.Printf("conn.Read: %s\n", err)
 			return
@@ -120,87 +115,63 @@ func (gw *Gateway) recv() {
 
 		// Decode to Msg struct
 		var base BaseMsg
-		if err := json.Unmarshal(buffer, &base); err != nil {
-			// Decode error
+		if err := json.Unmarshal(buffer[:n], &base); err != nil {
+			fmt.Printf("json.Unmarshal: %s\n", err)
+			continue
 		}
 
-		msg, ok := msgtype[base.Type]()
+		typeFunc, ok := msgtypes[base.Type]
 		if !ok {
-			// Unknown message type!
+			fmt.Printf("Unknown message type received!\n")
+			continue
 		}
-		if err := json.Unmarshal(buffer, &msg); err != nil {
-			// Decode error
+
+		msg := typeFunc()
+		if err := json.Unmarshal(buffer[:n], &msg); err != nil {
+			fmt.Printf("json.Unmarshal: %s\n", err)
+			continue		// Decode error
 		}
 
 		// Pass message on from here
-		if base.Id == 0 {
+		if base.Id == "" {
 			// Is this a Handle event?
 			if base.Handle == 0 {
 				// Nope. No idea what's going on...
 				// Error()
 			} else {
-				// Lookup Handle channel
-				// Pass event
+				// Lookup Session
+				gateway.Lock()
+				session := gateway.Sessions[base.Session]
+				gateway.Unlock()
+				if session == nil {
+					fmt.Printf("Unable to deliver message. Session gone?\n")
+					continue
+				}
+
+				// Lookup Handle
+				session.Lock()
+				handle := session.Handles[base.Handle]
+				session.Unlock()
+				if handle == nil {
+					fmt.Printf("Unable to deliver message. Handle gone?\n");
+					continue
+				}
+
+				// Pass msg
+				handle.Events <- msg
 			}
 		} else {
-			// Lookup Transaction channel
-			// Pass response
-		}
-
-		// Decode message
-		var data interface{}
-		err = json.Unmarshal(buffer[:n], &data)
-		if err != nil {
-			fmt.Printf("json.Unmarshal: %s\n", err)
-			return
-		}
-		msg := data.(map[string]interface{})
-
-		// Look up replyChan
-		transactionStr, ok := msg["transaction"].(string)
-		if !ok {
-			session_id := uint64(msg["session_id"].(float64))
-			if session_id == 0 {
-				// error, no session_id
-				continue
+			id, _ := strconv.ParseUint(base.Id, 10, 64) // FIXME: error checking
+			// Lookup Transaction
+			gateway.Lock()
+			transaction := gateway.transactions[id]
+			gateway.Unlock()
+			if transaction == nil {
+				// Error()
 			}
 
-			handle_id := uint64(msg["sender"].(float64))
-			if handle_id == 0 {
-				// error, no handle_id
-				continue
-			}
-
-			// Lookup session
-			gw.Lock()
-			session := gw.sessions[session_id]
-			gw.Unlock()
-			if session == nil {
-				// error, invalid session_id
-				continue
-			}
-
-			session.Lock()
-			handle := session.handles[handle_id]
-			session.Unlock()
-			if handle == nil {
-				// error, invalid handle_id
-				continue
-			}
-
-			handle.Events <- msg
-			continue
-		}
-
-		transaction, err := strconv.ParseUint(transactionStr, 10, 64)
-		gw.Lock()
-		replyChan := gw.replyChans[transaction]
-		gw.Unlock()
-
-		if replyChan != nil {
-			go func() {
-				replyChan <- msg
-			}()
+			// Pass msg
+			transaction <- msg
 		}
 	}
 }
@@ -208,41 +179,47 @@ func (gw *Gateway) recv() {
 // Info sends an info request to the Gateway.
 // If a successful response is received, it is returned. Otherwise an error
 // is returned.
-func (gw *Gateway) Info() (map[string]interface{}, error) {
-	info, ch := newRequest("info")
-	gw.send(info, ch)
-	response := <-ch
+func (gateway *Gateway) Info() (*InfoMsg, error) {
+	req, ch := newRequest("info")
+	gateway.send(req, ch)
 
-	if err := checkError(response); err != nil {
-		return nil, err
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *InfoMsg:
+		return msg, nil
+	case *ErrorMsg:
+		return nil, msg
 	}
 
-	return response, nil
+	return nil, unexpected("info")
 }
 
 // Create sends a create request to the Gateway.
 // If a successful response is received, a local Session instance is setup
 // with the returned session_id. Otherwise an error is returned.
-func (gw *Gateway) Create() (*Session, error) {
-	create, ch := newRequest("create")
-	gw.send(create, ch)
-	response := <-ch
+func (gateway *Gateway) Create() (*Session, error) {
+	req, ch := newRequest("create")
+	gateway.send(req, ch)
 
-	if err := checkError(response); err != nil {
-		return nil, err
+	msg := <-ch
+	var success *SuccessMsg
+	switch msg := msg.(type) {
+	case *SuccessMsg:
+		success = msg
+	case *ErrorMsg:
+		return nil, msg
 	}
-	data := response["data"].(map[string]interface{})
 
 	// Create new session
 	session := new(Session)
-	session.gateway = gw
-	session.id = uint64(data["id"].(float64))
-	session.handles = make(map[uint64]*Handle)
+	session.gateway = gateway
+	session.Id = success.Data.Id
+	session.Handles = make(map[uint64]*Handle)
 
 	// Store this session
-	gw.Lock()
-	gw.sessions[session.id] = session
-	gw.Unlock()
+	gateway.Lock()
+	gateway.Sessions[session.Id] = session
+	gateway.Unlock()
 
 	return session, nil
 }
@@ -250,84 +227,96 @@ func (gw *Gateway) Create() (*Session, error) {
 // Session represents a session instance on the Janus Gateway.
 type Session struct {
 	gateway *Gateway
-	id      uint64
-	handles map[uint64]*Handle
+	Id      uint64
+	Handles map[uint64]*Handle
 	sync.Mutex
 }
 
-func (s *Session) send(msg map[string]interface{}, replyChan chan map[string]interface{}) {
-	msg["session_id"] = s.id
-	s.gateway.send(msg, replyChan)
+func (session *Session) send(msg map[string]interface{}, transaction chan interface{}) {
+	msg["session_id"] = session.Id
+	session.gateway.send(msg, transaction)
 }
 
 // Attach sends an attach request to the Gateway within this session.
 // plugin should be the unique string of the plugin to attach to.
 // If a successful response is received, a local Handle instance is created
 // with the returned handle_id. Otherwise an error is returned.
-func (s *Session) Attach(plugin string) (*Handle, error) {
-	attach, ch := newRequest("attach")
-	attach["plugin"] = plugin
-	s.send(attach, ch)
-	response := <-ch
+func (session *Session) Attach(plugin string) (*Handle, error) {
+	req, ch := newRequest("attach")
+	req["plugin"] = plugin
+	session.send(req, ch)
 
-	if err := checkError(response); err != nil {
-		return nil, err
+	var success *SuccessMsg
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *SuccessMsg:
+		success = msg
+	case *ErrorMsg:
+		return nil, msg
 	}
 
-	data := response["data"].(map[string]interface{})
 	handle := new(Handle)
-	handle.session = s
-	handle.id = uint64(data["id"].(float64))
-	handle.Events = make(chan map[string]interface{}, 8)
-	s.Lock()
-	s.handles[handle.id] = handle
-	s.Unlock()
+	handle.session = session
+	handle.Id = success.Data.Id
+	handle.Events = make(chan interface{}, 8)
+
+	session.Lock()
+	session.Handles[handle.Id] = handle
+	session.Unlock()
+
 	return handle, nil
 }
 
 // KeepAlive sends a keep-alive request to the Gateway.
-func (s *Session) KeepAlive() (map[string]interface{}, error) {
-	keepalive, ch := newRequest("keepalive")
-	s.send(keepalive, ch)
-	response := <-ch
+func (session *Session) KeepAlive() (*AckMsg, error) {
+	req, ch := newRequest("keepalive")
+	session.send(req, ch)
 
-	if err := checkError(response); err != nil {
-		return nil, err
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *AckMsg:
+		return msg, nil
+	case *ErrorMsg:
+		return  nil, msg
 	}
 
-	return response, nil
+	return nil, unexpected("keepalive")
 }
 
 // Destroy sends a destroy request to the Gateway.
 // If a successful response is received, the local Session instance is cleaned
 // up. Otherwise an error is returned.
-func (s *Session) Destroy() error {
-	destroy, ch := newRequest("destroy")
-	s.send(destroy, ch)
+func (session *Session) Destroy() (*AckMsg, error) {
+	req, ch := newRequest("destroy")
+	session.send(req, ch)
 
-	response := <-ch
-	if err := checkError(response); err != nil {
-		return err
+	var ack *AckMsg
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *AckMsg:
+		ack = msg
+	case *ErrorMsg:
+		return nil, msg
 	}
 
 	// Remove this session from the gateway
-	s.gateway.Lock()
-	delete(s.gateway.sessions, s.id)
-	s.gateway.Unlock()
+	session.gateway.Lock()
+	delete(session.gateway.Sessions, session.Id)
+	session.gateway.Unlock()
 
-	return nil
+	return ack, nil
 }
 
 // Handle represents a handle to a plugin instance on the Gateway.
 type Handle struct {
 	session *Session
-	id      uint64
-	Events  chan map[string]interface{}
+	Id      uint64
+	Events  chan interface{}
 }
 
-func (h *Handle) send(msg map[string]interface{}, replyChan chan map[string]interface{}) {
-	msg["handle_id"] = h.id
-	h.session.send(msg, replyChan)
+func (handle *Handle) send(msg map[string]interface{}, transaction chan interface{}) {
+	msg["handle_id"] = handle.Id
+	handle.session.send(msg, transaction)
 }
 
 // Message sends a message request to a plugin handle on the Gateway.
@@ -335,122 +324,86 @@ func (h *Handle) send(msg map[string]interface{}, replyChan chan map[string]inte
 // contain an optional SDP offer/answer to establish a WebRTC PeerConnection.
 // If a successful response is received, it is returned. Othwerise an error is
 // returned.
-func (h *Handle) Message(body, jsep interface{}) (map[string]interface{}, error) {
-	message, ch := newRequest("message")
+func (handle *Handle) Message(body, jsep interface{}) (*EventMsg, error) {
+	req, ch := newRequest("message")
 	if body != nil {
-		message["body"] = body
+		req["body"] = body
 	}
 	if jsep != nil {
-		message["jsep"] = jsep
+		req["jsep"] = jsep
 	}
-	h.send(message, ch)
+	handle.send(req, ch)
 
-	// FIXME: handle 'ack' messages
-GetResponse:
-	response := <-ch
-	if err := checkError(response); err != nil {
-		return nil, err
+GetMessage: // No tears..
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *AckMsg:
+		goto GetMessage // ..only dreams.
+	case *EventMsg:
+		return msg, nil
+	case *ErrorMsg:
+		return nil, msg
 	}
 
-	if response["janus"].(string) == "ack" {
-		goto GetResponse
-	}
-
-	return response, nil
+	return nil, unexpected("message")
 }
 
 // Trickle sends a trickle request to the Gateway as part of the ICE process.
 // candidate should be a single ICE candidate, an Array of ICE candidates, or
 // a completed object: {"completed": true}.
 // If an error is received in response to this request, it is returned.
-func (h *Handle) Trickle(candidate interface{}) error {
-	trickle, ch := newRequest("trickle")
-	trickle["candidate"] = candidate
-	h.send(trickle, ch)
+func (handle *Handle) Trickle(candidate interface{}) (*AckMsg, error) {
+	req, ch := newRequest("trickle")
+	req["candidate"] = candidate
+	handle.send(req, ch)
 
-	response := <-ch
-	if err := checkError(response); err != nil {
-		return err
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *AckMsg:
+		return msg, nil
+	case *ErrorMsg:
+		return nil, msg
 	}
 
-	return nil
+	return nil, unexpected("trickle")
 }
 
-func (h *Handle) TrickleMany(candidates interface{}) error {
-	trickle, ch := newRequest("trickle")
-	trickle["candidates"] = candidates
-	h.send(trickle, ch)
+func (handle *Handle) TrickleMany(candidates interface{}) (*AckMsg, error) {
+	req, ch := newRequest("trickle")
+	req["candidates"] = candidates
+	handle.send(req, ch)
 
-	response := <-ch
-	if err := checkError(response); err != nil {
-		return err
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *AckMsg:
+		return msg, nil
+	case *ErrorMsg:
+		return nil, msg
 	}
 
-	return nil
+	return nil, unexpected("trickle")
 }
 
 // Detach sends a detach request to the Gateway.
 // If a successful response is received, the local Handle instance is cleaned
 // up. Otherwise an error is returned.
-func (h *Handle) Detach() error {
-	detach, ch := newRequest("detach")
-	h.send(detach, ch)
+func (handle *Handle) Detach() (*AckMsg, error) {
+	req, ch := newRequest("detach")
+	handle.send(req, ch)
 
-	response := <-ch
-	if err := checkError(response); err != nil {
-		return err
+	var ack *AckMsg
+	msg := <-ch
+	switch msg := msg.(type) {
+	case *AckMsg:
+		ack = msg
+	case *ErrorMsg:
+		return nil, msg
 	}
 
 	// Remove this handle from the session
-	h.session.Lock()
-	delete(h.session.handles, h.id)
-	h.session.Unlock()
+	handle.session.Lock()
+	delete(handle.session.Handles, handle.Id)
+	handle.session.Unlock()
 
-	return nil
-}
-
-type GatewayRequest interface {
-	GetTransaction() uint64
-	SetTransaction(uint64)
-}
-
-type SessionRequest interface {
-	GatewayRequest
-	GetSessionId() uint64
-	SetSessionId(uint64)
-}
-
-type HandleRequest interface {
-	GetHandleId() uint64
-	SetHandleId(uint64)
-}
-
-type Transaction uint64
-
-func (t *Transaction) GetTransaction() uint64 {
-	return uint64(*t)
-}
-
-func (t *Transaction) SetTransaction(transaction uint64) {
-	*t = Transaction(transaction)
-}
-
-type SessionId uint64
-
-func (sid *SessionId) GetSessionId() uint64 {
-	return uint64(*sid)
-}
-
-func (sid *SessionId) SetSessionId(id uint64) {
-	*sid = SessionId(id)
-}
-
-type HandleId uint64
-
-func (hid *HandleId) GetHandleId() uint64 {
-	return uint64(*hid)
-}
-
-func (hid *HandleId) SetHandleId(id uint64) {
-	*hid = HandleId(id)
+	return ack, nil
 }

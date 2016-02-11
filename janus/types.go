@@ -1,6 +1,18 @@
 package janus
 
-type Msg struct {
+var msgtypes = map[string]func() interface{}{
+	"error":       func() interface{} { return &ErrorMsg{} },
+	"success":     func() interface{} { return &SuccessMsg{} },
+	"detached":    func() interface{} { return &DetachedMsg{} },
+	"server_info": func() interface{} { return &InfoMsg{} },
+	"ack":         func() interface{} { return &AckMsg{} },
+	"event":       func() interface{} { return &EventMsg{} },
+	"webrtcup":    func() interface{} { return &WebRTCUpMsg{} },
+	"media":       func() interface{} { return &MediaMsg{} },
+	"hangup":      func() interface{} { return &HangupMsg{} },
+}
+
+type BaseMsg struct {
 	Type    string `json:"janus"`
 	Id      string `json:"transaction"`
 	Session uint64 `json:"session_id"`
@@ -8,13 +20,27 @@ type Msg struct {
 }
 
 type ErrorMsg struct {
+	Err ErrorData `json:"error"`
+}
+
+type ErrorData struct {
 	Code   int
 	Reason string
 }
 
+func (err *ErrorMsg) Error() string {
+	return err.Err.Reason
+}
+
 type SuccessMsg struct {
+	Data SuccessData
+}
+
+type SuccessData struct {
 	Id uint64
 }
+
+type DetachedMsg struct {}
 
 type InfoMsg struct {
 	Name          string
@@ -39,34 +65,22 @@ type PluginInfo struct {
 type AckMsg struct{}
 
 type EventMsg struct {
-	Plugin string
-	Data   map[string]interface{}
-	Jsep   JSEP
+	Plugindata PluginData
+	Jsep   map[string]interface{}
 }
 
-type JSEP struct {
-	Type string
-	SDP  string
+type PluginData struct {
+	Plugin string
+	Data map[string]interface{}
 }
 
 type WebRTCUpMsg struct{}
 
 type MediaMsg struct {
 	Type      string
-	Receiving bool
+	Receiving string
 }
 
 type HangupMsg struct {
 	Reason string
-}
-
-var msgtypes = map[string]func() interface{}{
-	"error":       func() interface{} { return &ErrorMsg{} },
-	"success":     func() interface{} { return &SuccessMsg{} },
-	"server_info": func() interface{} { return &InfoMsg{} },
-	"ack":         func() interface{} { return &AckMsg{} },
-	"event":       func() interface{} { return &EventMsg{} },
-	"webrtcup":    func() interface{} { return &WebRTCUpMsg{} },
-	"media":       func() interface{} { return &MediaMsg{} },
-	"hangup":      func() interface{} { return &HangupMsg{} },
 }
