@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/burntsushi/toml"
 	"github.com/nowylie/go-janus/janus"
+	"html/template"
 	"net/http"
 	"os"
 	"time"
@@ -11,22 +13,49 @@ import (
 
 var gateway *janus.Gateway
 
+type Config struct {
+	Port    uint
+	Html    string
+	Path    string
+	Servers []Server `toml:"iceServer"`
+}
+
+type Server struct {
+	Urls       string `json:"urls"`
+	Username   string `json:"username,omitempty"`
+	Credential string `json:"password,omitempty"`
+}
+
+var config Config
+var output *template.Template
+
 func main() {
 	var err error
 
 	if len(os.Args) < 2 {
-		fmt.Printf("usage: janus-echotest </path/to/socket>\n")
+		fmt.Printf("usage: janus-echotest </path/to/config>\n")
 		return
 	}
 
-	gateway, err = janus.Connect(os.Args[1])
+	if _, err := toml.DecodeFile(os.Args[1], &config); err != nil {
+		fmt.Printf("toml.Decode: %s\n", err)
+		return
+	}
+
+	output, err = template.ParseFiles(config.Html)
+	if err != nil {
+		fmt.Printf("template.ParseFiles: %s\n", err)
+		return
+	}
+
+	gateway, err = janus.Connect(config.Path)
 	if err != nil {
 		fmt.Printf("Connect: %s\n")
 		return
 	}
 
 	http.HandleFunc("/", EchoTest)
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(fmt.Sprintf(":%d", config.Port), nil)
 }
 
 type Request struct {
@@ -36,11 +65,17 @@ type Request struct {
 }
 
 func EchoTest(w http.ResponseWriter, r *http.Request) {
-   fmt.Printf("%s %s %s\n", r.Method, r.URL, r.Proto)
+	fmt.Printf("%s %s %s\n", r.Method, r.URL, r.Proto)
 	if r.Method == "GET" {
-		_, err := w.Write([]byte(echoHtml))
+		servers, err := json.Marshal(config.Servers)
 		if err != nil {
-			fmt.Printf("http.ResponseWriter.Write: %s\n", err)
+			fmt.Printf("json.Marshal: %s\n", err)
+			return
+		}
+
+		err = output.Execute(w, template.JS(servers))
+		if err != nil {
+			fmt.Printf("template.Execute: %s\n", err)
 			return
 		}
 		return
@@ -52,7 +87,7 @@ func EchoTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stop := make(chan interface{})
+	stop := make(chan struct{})
 	go keepalive(session, stop)
 
 	handle, err := session.Attach("janus.plugin.echotest")
@@ -96,7 +131,7 @@ func EchoTest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func watch(session *janus.Session, handle *janus.Handle, stop chan interface{}) {
+func watch(session *janus.Session, handle *janus.Handle, stop chan struct{}) {
 	for {
 		msg := <-handle.Events
 		switch msg := msg.(type) {
@@ -105,12 +140,13 @@ func watch(session *janus.Session, handle *janus.Handle, stop chan interface{}) 
 				handle.Detach()
 				session.Destroy()
 				close(stop)
+				return
 			}
 		}
 	}
 }
 
-func keepalive(session *janus.Session, stop chan interface{}) {
+func keepalive(session *janus.Session, stop chan struct{}) {
 	ticker := time.NewTicker(time.Second * 30)
 
 	for {
