@@ -1,3 +1,21 @@
+// Msg Types
+//
+// All messages received from the gateway are first decoded to the BaseMsg
+// type. The BaseMsg type extracts the following JSON from the message:
+//		{
+//			"janus": <Type>,
+//			"transaction": <Id>,
+//			"session_id": <Session>,
+//			"sender": <Handle>
+//		}
+// The Type field is inspected to determine which concrete type
+// to decode the message to, while the other fields (Id/Session/Handle) are
+// inspected to determine where the message should be delivered. Messages
+// with an Id field defined are considered responses to preview requests, and
+// will be passed directly to requester. Messages without an Id field are
+// considered unsolicited events from the gateway and are expected to have
+// both Session and Handle fields defined. They will be passed to the Events
+// channel of the related Handle and can be read from there.
 package janus
 
 var msgtypes = map[string]func() interface{}{
@@ -40,7 +58,7 @@ type SuccessData struct {
 	Id uint64
 }
 
-type DetachedMsg struct {}
+type DetachedMsg struct{}
 
 type InfoMsg struct {
 	Name          string
@@ -66,12 +84,12 @@ type AckMsg struct{}
 
 type EventMsg struct {
 	Plugindata PluginData
-	Jsep   map[string]interface{}
+	Jsep       map[string]interface{}
 }
 
 type PluginData struct {
 	Plugin string
-	Data map[string]interface{}
+	Data   map[string]interface{}
 }
 
 type WebRTCUpMsg struct{}

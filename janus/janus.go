@@ -33,17 +33,23 @@ func newRequest(method string) (map[string]interface{}, chan interface{}) {
 
 // Gateway represents a connection to an instance of the Janus Gateway.
 type Gateway struct {
+	// Sessions is a map of the currently active sessions to the gateway.
+	Sessions map[uint64]*Session
+
+	// Access to the Sessions map should be synchronized with the Gateway.Lock()
+	// and Gateway.Unlock() methods provided by the embeded sync.Mutex.
+	sync.Mutex
+
 	conn            net.Conn
 	nextTransaction uint64
 	transactions    map[uint64]chan interface{}
-	Sessions        map[uint64]*Session
-	sync.Mutex
 }
 
 // Connect creates a new Gateway instance, connected to the Janus Gateway.
-// rpath should be a filesystem path to the Unix Socket that the Unix transport
+// path should be a filesystem path to the Unix Socket that the Unix transport
 // is bound to.
-func Connect(rpath string) (*Gateway, error) {
+// On success, a new Gateway object will be returned and error will be nil.
+func Connect(path string) (*Gateway, error) {
 	lpath := fmt.Sprintf("/tmp/janus-echotest.%d", os.Getpid())
 	laddr := &net.UnixAddr{lpath, "unixgram"}
 	raddr := &net.UnixAddr{rpath, "unixgram"}
@@ -61,6 +67,7 @@ func Connect(rpath string) (*Gateway, error) {
 	return gateway, nil
 }
 
+// Close closes the underlying connection to the Gateway.
 func (gateway *Gateway) Close() error {
 	return gateway.conn.Close()
 }
@@ -95,7 +102,7 @@ func (gateway *Gateway) send(msg map[string]interface{}, transaction chan interf
 }
 
 func passMsg(ch chan interface{}, msg interface{}) {
-   ch <- msg
+	ch <- msg
 }
 
 func (gateway *Gateway) recv() {
@@ -133,7 +140,7 @@ func (gateway *Gateway) recv() {
 		msg := typeFunc()
 		if err := json.Unmarshal(buffer[:n], &msg); err != nil {
 			fmt.Printf("json.Unmarshal: %s\n", err)
-			continue		// Decode error
+			continue // Decode error
 		}
 
 		// Pass message on from here
@@ -157,7 +164,7 @@ func (gateway *Gateway) recv() {
 				handle := session.Handles[base.Handle]
 				session.Unlock()
 				if handle == nil {
-					fmt.Printf("Unable to deliver message. Handle gone?\n");
+					fmt.Printf("Unable to deliver message. Handle gone?\n")
 					continue
 				}
 
@@ -181,8 +188,7 @@ func (gateway *Gateway) recv() {
 }
 
 // Info sends an info request to the Gateway.
-// If a successful response is received, it is returned. Otherwise an error
-// is returned.
+// On success, an InfoMsg will be returned and error will be nil.
 func (gateway *Gateway) Info() (*InfoMsg, error) {
 	req, ch := newRequest("info")
 	gateway.send(req, ch)
@@ -199,8 +205,7 @@ func (gateway *Gateway) Info() (*InfoMsg, error) {
 }
 
 // Create sends a create request to the Gateway.
-// If a successful response is received, a local Session instance is setup
-// with the returned session_id. Otherwise an error is returned.
+// On success, a new Session will be returned and error will be nil.
 func (gateway *Gateway) Create() (*Session, error) {
 	req, ch := newRequest("create")
 	gateway.send(req, ch)
@@ -230,10 +235,17 @@ func (gateway *Gateway) Create() (*Session, error) {
 
 // Session represents a session instance on the Janus Gateway.
 type Session struct {
-	gateway *Gateway
-	Id      uint64
+	// Id is the session_id of this session
+	Id uint64
+
+	// Handles is a map of plugin handles within this session
 	Handles map[uint64]*Handle
+
+	// Access to the Handles map should be synchronized with the Session.Lock()
+	// and Session.Unlock() methods provided by the embeded sync.Mutex.
 	sync.Mutex
+
+	gateway *Gateway
 }
 
 func (session *Session) send(msg map[string]interface{}, transaction chan interface{}) {
@@ -243,8 +255,7 @@ func (session *Session) send(msg map[string]interface{}, transaction chan interf
 
 // Attach sends an attach request to the Gateway within this session.
 // plugin should be the unique string of the plugin to attach to.
-// If a successful response is received, a local Handle instance is created
-// with the returned handle_id. Otherwise an error is returned.
+// On success, a new Handle will be returned and error will be nil.
 func (session *Session) Attach(plugin string) (*Handle, error) {
 	req, ch := newRequest("attach")
 	req["plugin"] = plugin
@@ -272,6 +283,7 @@ func (session *Session) Attach(plugin string) (*Handle, error) {
 }
 
 // KeepAlive sends a keep-alive request to the Gateway.
+// On success, an AckMsg will be returned and error will be nil.
 func (session *Session) KeepAlive() (*AckMsg, error) {
 	req, ch := newRequest("keepalive")
 	session.send(req, ch)
@@ -281,15 +293,15 @@ func (session *Session) KeepAlive() (*AckMsg, error) {
 	case *AckMsg:
 		return msg, nil
 	case *ErrorMsg:
-		return  nil, msg
+		return nil, msg
 	}
 
 	return nil, unexpected("keepalive")
 }
 
-// Destroy sends a destroy request to the Gateway.
-// If a successful response is received, the local Session instance is cleaned
-// up. Otherwise an error is returned.
+// Destroy sends a destroy request to the Gateway to tear down this session.
+// On success, the Session will be removed from the Gateway.Sessions map, an
+// AckMsg will be returned and error will be nil.
 func (session *Session) Destroy() (*AckMsg, error) {
 	req, ch := newRequest("destroy")
 	session.send(req, ch)
@@ -313,9 +325,14 @@ func (session *Session) Destroy() (*AckMsg, error) {
 
 // Handle represents a handle to a plugin instance on the Gateway.
 type Handle struct {
+	// Id is the handle_id of this plugin handle
+	Id uint64
+
+	// Events is a receive only channel that can be used to receive events
+	// related to this handle from the gateway.
+	Events <-chan interface{}
+
 	session *Session
-	Id      uint64
-	Events  chan interface{}
 }
 
 func (handle *Handle) send(msg map[string]interface{}, transaction chan interface{}) {
@@ -326,8 +343,7 @@ func (handle *Handle) send(msg map[string]interface{}, transaction chan interfac
 // Message sends a message request to a plugin handle on the Gateway.
 // body should be the plugin data to be passed to the plugin, and jsep should
 // contain an optional SDP offer/answer to establish a WebRTC PeerConnection.
-// If a successful response is received, it is returned. Othwerise an error is
-// returned.
+// On success, an EventMsg will be returned and error will be nil.
 func (handle *Handle) Message(body, jsep interface{}) (*EventMsg, error) {
 	req, ch := newRequest("message")
 	if body != nil {
@@ -352,10 +368,14 @@ GetMessage: // No tears..
 	return nil, unexpected("message")
 }
 
-// Trickle sends a trickle request to the Gateway as part of the ICE process.
-// candidate should be a single ICE candidate, an Array of ICE candidates, or
-// a completed object: {"completed": true}.
-// If an error is received in response to this request, it is returned.
+// Trickle sends a trickle request to the Gateway as part of establishing
+// a new PeerConnection with a plugin.
+// candidate should be a single ICE candidate, or a completed object to
+// signify that all candidates have been sent:
+//		{
+//			"completed": true
+//		}
+// On success, an AckMsg will be returned and error will be nil.
 func (handle *Handle) Trickle(candidate interface{}) (*AckMsg, error) {
 	req, ch := newRequest("trickle")
 	req["candidate"] = candidate
@@ -372,6 +392,10 @@ func (handle *Handle) Trickle(candidate interface{}) (*AckMsg, error) {
 	return nil, unexpected("trickle")
 }
 
+// TrickleMany sends a trickle request to the Gateway as part of establishing
+// a new PeerConnection with a plugin.
+// candidates should be an array of ICE candidates.
+// On success, an AckMsg will be returned and error will be nil.
 func (handle *Handle) TrickleMany(candidates interface{}) (*AckMsg, error) {
 	req, ch := newRequest("trickle")
 	req["candidates"] = candidates
@@ -388,9 +412,8 @@ func (handle *Handle) TrickleMany(candidates interface{}) (*AckMsg, error) {
 	return nil, unexpected("trickle")
 }
 
-// Detach sends a detach request to the Gateway.
-// If a successful response is received, the local Handle instance is cleaned
-// up. Otherwise an error is returned.
+// Detach sends a detach request to the Gateway to remove this handle.
+// On success, an AckMsg will be returned and error will be nil.
 func (handle *Handle) Detach() (*AckMsg, error) {
 	req, ch := newRequest("detach")
 	handle.send(req, ch)
