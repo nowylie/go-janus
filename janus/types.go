@@ -11,7 +11,7 @@
 // The Type field is inspected to determine which concrete type
 // to decode the message to, while the other fields (Id/Session/Handle) are
 // inspected to determine where the message should be delivered. Messages
-// with an Id field defined are considered responses to preview requests, and
+// with an Id field defined are considered responses to previous requests, and
 // will be passed directly to requester. Messages without an Id field are
 // considered unsolicited events from the gateway and are expected to have
 // both Session and Handle fields defined. They will be passed to the Events
